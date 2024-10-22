@@ -1,0 +1,654 @@
+---
+title: "Détection d'anomalie"
+author: "Hassan Maissoro"
+date: "14/06/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, eval = FALSE)
+```
+
+
+```{r}
+if (! require('data.table', quietly = TRUE)){ install.packages('data.table') } ; library('data.table', quietly = TRUE)
+if (! require('fst', quietly = TRUE)){ install.packages('fst') } ; library('fst', quietly = TRUE)
+if (! require('dtw', quietly = TRUE)){ install.packages('dtw') } ; library('dtw', quietly = TRUE)
+if (! require('raster', quietly = TRUE)){ install.packages('raster') } ; library('raster', quietly = TRUE)
+if (! require('cluster', quietly = TRUE)){ install.packages('cluster') } ; library('cluster', quietly = TRUE)
+if (! require('factoextra', quietly = TRUE)){ install.packages('factoextra') } ; library('factoextra', quietly = TRUE) 
+if (! require('lubridate', quietly = TRUE)){ install.packages('lubridate') } ; library('lubridate', warn.conflicts = FALSE)
+if (! require('dtwclust', quietly = TRUE)){ install.packages('dtwclust') } ; library('dtwclust', warn.conflicts = FALSE)
+```
+
+```{r}
+df_mean_2h <- readRDS("~/Stage/functionnal_data_analysis/data_exploration/df_mean_2h.rds")
+```
+
+# Fonctions de détection d'anomalie
+
+```{r}
+# Fonction de répartition
+repartition_function <- function(sample){
+  
+  fr.x <- sapply(sample, function(x){
+    length(sample[which(sample <= x)])/length(sample)})
+  
+  return(fr.x)
+}
+
+# Fonction profondeur de Tukey
+tukey_depth <- function(sample){
+  #--- Fonction de répartition
+  fr.x <- repartition_function(sample)
+  
+  #--- Fonction depth
+  depth <- 1/2 - abs(1/2 - fr.x)
+  
+  return(depth)
+}
+
+# Fonction profondeur simpliciale
+simplicial_depth <- function(sample){
+  #--- Fonction de répartition
+  fr.x <- repartition_function(sample)
+  
+  #--- Fonction depth
+  depth <- 2*fr.x*(1-fr.x)
+  
+  return(depth)
+}
+
+# Prend une matrice N x Sampling time
+functional_tukey_depth <- function(fda_mat){
+  res_mat <- matrix(0, nrow = nrow(fda_mat), ncol = ncol(fda_mat))
+  for (t in 1:ncol(fda_mat)) {
+    res_mat[,t] <- tukey_depth(fda_mat[,t])
+  }
+  fda_depth <- rowSums(res_mat)/ncol(fda_mat)
+  return(fda_depth)
+}
+
+# Prend une matrice N x Sampling time
+functional_simplicial_depth <- function(fda_mat){
+  res_mat <- matrix(0, nrow = nrow(fda_mat), ncol = ncol(fda_mat))
+  for (t in 1:ncol(fda_mat)) {
+    res_mat[,t] <- simplicial_depth(fda_mat[,t])
+  }
+  fda_depth <- rowSums(res_mat)/ncol(fda_mat)
+  return(fda_depth)
+}
+```
+
+# Simulation
+L'ojectif de cette partie est de simuler des courbes pour appliquer la détection d'anomalie grâce aux fonctions profondeurs. On se propose de simuler des processus en suivant la même logique que la production d'électricité par des parcs éoliens. On suppose que chaque parc éolien a exactement $J$ éolienne. La quantité totale d'électricité produite par ce parc est la somme des quantités d'électricité produites par chacune de ses $J$ éoliennes.
+
+On note $\mathrm{X}_{ij}(t)$ la quantité d'électricité produite à l'instant $t\in[0,1]$ par l'éolienne du $j=1,\dots, J$ du parc $i = 1,\dots, N$. On suppose que les
+$$
+\forall\ \ t\in[0,1], \ \ \ \ \  \mathrm{X}_{ij}(t) = \lvert \mathrm{Y} \rvert,\ \ \ \text{ avec  }\ \ \ \ \mathrm{Y} \sim \mathcal{N}(\mu,\; \sigma^2),
+$$
+sont i.i.d. suivant $i$ et $j$. Ainsi, pour chaque parc, on peut prendre une grille de temps $0<t_1<t_2 < \dots < t_K < 1$ et simuler les vecteurs $\Big(\mathrm{X}_{ij}(t_1),\ \mathrm{X}_{ij}(t_2),\dots, \mathrm{X}_{ij}(t_K)\Big)^\top$ comme production d'électricité de l'éolienne $j$ du parc $i$ aux instants successifs $t_1<t_2 < \dots < t_K$.
+
+On choisit aléatoirement quelques parcs et dans chaque parc on choisit aléatoirement quelques éoliennes qu'on suppose en panne sur une période aléatoire.
+
+<ul>
+  <li> On choisit uniformément $p$ parcs parmi $N$ ($p << N$).</li>
+  <li> Dans chaque parc, on choisit uniformément $q$ parcs parmi $J$ ($q << J$).</li>
+  <li> On diminue de $1/100$ la moyenne $\mu$ pour les instants qui sont sur le segment $\overline{\mathrm{U}_{1}\mathrm{U}_{2}}$, avec $\mathrm{U}_{1}\sim \mathcal{U}([0,1])$ et $\mathrm{U}_{2}\sim \mathcal{U}([0,1]$.</li>
+</ul>
+
+```{r}
+simulate_contaminated_curves <- function(N, 
+                                         n_sampling_point,
+                                         n_eolienne,
+                                         n_contanimated_parc, 
+                                         n_contanimated_eolienne,
+                                         mean  = 100,
+                                         sd = 0.05){
+  
+  # Simulation des données
+  random_prod <- vector(mode = "list", length = N)
+  Time <- seq(0,1, by = 1/n_sampling_point)
+  for (i in 1:N) {
+    # On prend une matrice vide avec les indexes du temp
+    production_by_parc <- matrix(0, ncol = n_eolienne+1, nrow = n_sampling_point)
+    production_by_parc[,1] <- Time[1:n_sampling_point]
+    
+    # On simule les données
+    for(j in 2:n_eolienne){
+      production_by_parc[,j] <- abs(rnorm(n = n_sampling_point,
+                                       mean = mean,
+                                       sd = sd))
+    }
+    random_prod[[i]] <- production_by_parc
+  }
+  
+  # Ajout anomalie
+  
+  # -- 1) On prend 50 parc par harsard
+  id_parc_random <- sample(1:N, n_contanimated_parc)
+  
+  # -- 2) On chaque parc 
+  for(id in id_parc_random){
+    df_by_parc <- random_prod[[id]]
+    
+    # -- 3) On prend 5 éolienne par hasard
+    id_eolienne <- sample(1:n_eolienne, n_contanimated_eolienne)
+    for (id_eol in id_eolienne) {
+      # -- 3.1) On prend la partie qui sera comtaminée
+      B1 <- runif(n = 1, min = 0, max = 1)
+      B2 <- runif(n = 1, min = 0, max = 1)
+      if(B1 < B2){
+        U_1 <- B1
+        U_2 <- B2
+      }else{
+        U_1 <- B2
+        U_2 <- B1
+      }
+      
+      # -- 3.2) On met à zéro la production de ces éoliennes
+      underproduction_area_length <- length(df_by_parc[which(df_by_parc[,1] >= U_1 & df_by_parc[,1] <= U_2), id_eol])
+      df_by_parc[which(df_by_parc[,1] >= U_1 & df_by_parc[,1] <= U_2), id_eol] <- abs(rnorm(
+        n = underproduction_area_length,
+        mean = mean*99/100,
+        sd = sd))
+    }
+      
+    # -- 4) On stocke les données contaminée
+    random_prod[[id]] <- df_by_parc
+  }
+  
+  # -- 5) On prend la production totale d'un parc comme somme des productions par éolienne
+    
+    for(i in 1:N){
+      # -- 5.1) On prend les données par parc
+      df_by_parc <- random_prod[[i]]
+      
+      # -- 5.2) On agrége :sum et on divis par le max pour se ramer sur [0,1]
+      dt <- rowSums(df_by_parc[, 2:n_eolienne])/max(rowSums(df_by_parc[, 2:n_eolienne]))
+      if(i ==1){
+        final_data <- dt
+      }else{
+        final_data <- rbind(final_data,dt)
+      }
+    }
+  # -- 6) On crée une variable pour garder la trace des courbes contaminée par une sous-production
+  final_data <- cbind(id_prod = 1:N, 
+                      label = ifelse(1:N %in% id_parc_random, "contaminated", "safe"),
+                      final_data)
+  
+  # -- 7) On renvoie les données simulées
+  return(final_data)
+}
+```
+
+```{r}
+test.sim <- simulate_contaminated_curves(N = 200,
+                                     n_sampling_point = 4380,
+                                     n_eolienne = 30,
+                                     n_contanimated_parc = 10,
+                                     n_contanimated_eolienne = 2,
+                                     mean  = 100,
+                                     sd = 1)
+```
+
+## Plot simulated curves
+```{r}
+x <- seq(0,1, , 4380)
+par(mar=c(5, 4, 4, 4) + 0.1)
+plot.ts(x, test.sim[144, -c(1,2)], type = "l", xlab = "t", ylab = "X(t)")
+
+par(new=TRUE)
+
+lines(x, test.sim[111, -c(1,2)], col = "red", type = "l", xlab = "t", ylab = "X(t)")
+axis(4, ylim=c(0.90,1), col.axis = "blue",las=1)
+
+
+```
+
+
+
+## Détection par la profondeur de Tukey
+```{r}
+
+# ------ Etape 1 : On calcul la profondeur pour toutes les courbes
+f_tukey_depth <- functional_tukey_depth(test.sim[, -c(1,2)])
+
+# On regroupe id et label
+df_tukey_depth <- data.table(id = test.sim[, 1], 
+                             label = test.sim[, 2], 
+                             depth = f_tukey_depth)
+
+# on sort pour fixer un seuil on prendles courbes
+df_tukey_depth <- df_tukey_depth[order(depth),]
+df_tukey_depth
+
+# ------ On enlève les courbes ayant les plus petites profondeurs
+detected_id <- df_tukey_depth[which(depth <290), id]
+test.sim <- as.data.frame(test.sim)
+
+test.sim2 <- test.sim[! (test.sim$id_prod %in%detected_id), ]
+
+# ------ Etape 2 : On récalcul la profondeur
+f_tukey_depth <- functional_tukey_depth(test.sim2[, -c(1,2)])
+
+# On regroupe id et label
+df_tukey_depth <- data.table(id = test.sim2[, 1], 
+                             label = test.sim2[, 2], 
+                             depth = f_tukey_depth)
+
+# on sort pour fixer un seuil on prendles courbes
+df_tukey_depth <- df_tukey_depth[order(depth),]
+df_tukey_depth
+
+# ------ On enlève les courbes ayant les plus petites profondeurs
+detected_id <- df_tukey_depth[which(depth <966), id]
+
+test.sim3 <- test.sim2[! (test.sim2$id_prod %in%detected_id), ]
+
+# ------ Etape 3 : On récalcul la profondeur
+f_tukey_depth <- functional_tukey_depth(test.sim3[, -c(1,2)])
+
+# On regroupe id et label
+df_tukey_depth <- data.table(id = test.sim2[, 1], 
+                             label = test.sim2[, 2], 
+                             depth = f_tukey_depth)
+
+# on sort pour fixer un seuil on prendles courbes
+df_tukey_depth <- df_tukey_depth[order(depth),]
+df_tukey_depth
+
+# ------ On enlève les courbes ayant les plus petites profondeurs
+detected_id <- df_tukey_depth[which(depth <966), id]
+
+test.sim3 <- test.sim2[! (test.sim2$id_prod %in%detected_id), ]
+
+```
+
+## Détection par la profondeur simpliciale
+
+```{r}
+f_sdepth <- functional_simplicial_depth(test.sim[, -c(1,2)])
+# On regroupe id et label
+df_sdepth <- data.table(id = test.sim[, 1], 
+                             label = test.sim[, 2], 
+                             depth = f_sdepth)
+
+# on sort pour fixer un seuil on prendles courbes
+df_sdepth <- df_sdepth[order(depth),]
+df_sdepth
+```
+
+
+# Application sur données réels
+```{r}
+# Import des données, moyenne de chaque 2h
+# raison : temps de calcul long
+df_mean_2h <- readRDS("~/Stage/functionnal_data_analysis/data_exploration/df_mean_2h.rds")
+df_mat <- as.matrix(df_mean_2h[, -1])
+rownames(df_mat) <- df_mean_2h[,1]
+
+# For map
+dt_graph <- readRDS("~/Stage/functionnal_data_analysis/data_exploration/dt_for_graph.rds")
+adm_fr <- raster::getData('GADM', country='FRA', level=1)
+```
+
+```{r}
+# Plot function
+plot_one_map <- function(df_mat, dt_graph, cluster_vector, map_title=""){
+  # - 1) On extrait les coordonnées
+  data_graph <- unique(dt_graph[id_prod %in% rownames(df_mat), .(LAT, LON), by = id_prod])
+  cah_cluster <- data.table(id_prod = rownames(df_mat), cluster = cluster_vector)
+
+  data_cluster_graph <- merge(cah_cluster, data_graph, by = 'id_prod')
+
+  # - 2) Carte
+  par(mar=c(1,1,1,1),bg="transparent")
+  plot(adm_fr, main = map_title, cex.main=0.6)
+  points(data_cluster_graph[['LON']], data_cluster_graph[['LAT']], 
+         col = data_cluster_graph[['cluster']], pch=5, cex=0.6)
+}
+```
+
+## Lissage des courbes
+
+```{r}
+fb <- create.fourier.basis(rangeval = c(1, ncol(df_mat)), nbasis =  360)
+
+
+df_fda.curve <- Data2fd(argvals = 1:ncol(df_mat), y = t(df_mat),
+                      lambda = 1,
+                      basisobj = fb, method="chol", dfscale=1)
+```
+
+Algorithme de choix optimal des paramètres de lissage en cours d'exécution...
+
+## Analyse en coposantes princiaples fonctionnelles
+
+```{r}
+# nharm : nombre de composantes principales
+# centerfns : Centrer ou pas
+# fdobj : functional data object
+
+res.fpca <- pca.fd(fdobj = df_fda.curve, nharm = 25, centerfns = TRUE)
+```
+
+
+```{r}
+# proportion of variance explained by each eigenfunction
+sum(res.fpca$varprop)
+
+```
+## Clustering
+
+### Clustering sur scores
+
+#### CAH
+```{r}
+d <- dist(res.fpca$scores, y = "euclidean")
+silhouette_score_cah <- function(k){
+  hc <- hclust(d, method = "ward.D2" )
+  ss <- silhouette(cutree(hc, k = k), d)
+  mean(ss[, 3])
+}
+
+k <- 2:50
+avg_sil_cah <- sapply(k, silhouette_score_cah)
+plot(k, type='b', avg_sil_cah, xlab='Best number of clusters', ylab='Average Silhouette Scores', frame=FALSE)
+```
+
+```{r}
+cat('Le meilleur K pour la CAH est ', which.max(avg_sil_cah) + 1)
+```
+
+```{r}
+hc <- hclust(d, method = "ward.D2" )
+cah <- cutree(hc, k = 12)
+table(cah)
+```
+
+```{r}
+# On calcule distance euclidienne entre les cordonnées
+d.fpca <- dist(res.fpca$scores, y = "euclidean")
+
+# On fait la CAH
+hc <- hclust(d.fpca, method = "ward.D2" )
+
+K <- c(2, 5, 7, 12)
+fcah_k <- matrix(0, nrow = nrow(df_mat), ncol = length(K))
+
+for (k in 1:length(K)) {
+  fcah_k[,k] <- cutree(hc, k = K[k])
+}
+rownames(fcah_k) <- rownames(df_mat)
+
+```
+
+```{r}
+# Les fermes sur la carte 
+par(mfrow = c(2,2))
+plot_one_map(df_mat, dt_graph, fcah_k[,1], map_title="ACPF puis CAH avec 2 partitions")
+plot_one_map(df_mat, dt_graph, fcah_k[,2], map_title="ACPF puis CAH avec 5 partitions")
+plot_one_map(df_mat, dt_graph, fcah_k[,3], map_title="ACPF puis CAH avec 7 partitions")
+plot_one_map(df_mat, dt_graph, fcah_k[,4], map_title="ACPF puis CAH avec 12 partitions")
+```
+```{r}
+hc <- hclust(d, method = "ward.D2" )
+acpf.cah <- cutree(hc, k = 12)
+
+names(acpf.cah) <- rownames(df_mat)
+table(acpf.cah)
+```
+#### K-means on FPCA score
+```{r}
+# On calcule distance euclidienne entre les cordonnées
+d.fpca <- dist(res.fpca$scores, y = "euclidean")
+
+# On fait la CAH
+km2 <- kmeans(d.fpca, centers = 2, iter.max = 200)
+km3 <- kmeans(d.fpca, centers = 3, iter.max = 200)
+km5 <- kmeans(d.fpca, centers = 5, iter.max = 200)
+km7 <- kmeans(d.fpca, centers = 7, iter.max = 200)
+acpf.km <- kmeans(d.fpca, centers = 12, iter.max = 200)
+
+names(km2$cluster) <- rownames(df_mat)
+names(km3$cluster) <- rownames(df_mat)
+names(km5$cluster) <- rownames(df_mat)
+names(km7$cluster) <- rownames(df_mat)
+names(acpf.km$cluster) <- rownames(df_mat)
+table(acpf.km$cluster)
+```
+
+```{r}
+# Les fermes sur la carte
+par(mfrow = c(2,2))
+plot_one_map_km(dt_graph, fkm2$cluster, map_title="FPCA Kmeans K=2")
+plot_one_map_km(dt_graph, fkm3$cluster, map_title="FPCA Kmeans K=3")
+plot_one_map_km(dt_graph, fkm5$cluster, map_title="FPCA Kmeans K=5")
+plot_one_map_km(dt_graph, fkm7$cluster, map_title="FPCA Kmeans K=7")
+```
+
+#### Dbscan
+
+```{r}
+library(dbscan)
+silhouette_score_dbscan <- function(e){
+  db <- dbscan(d.fpca, eps = e, minPts = 25)
+  ss <- silhouette(db$cluster, d.fpca)
+  mean(ss[, 3])
+}
+db <- dbscan(d.fpca, eps = 10, minPts = 25)
+table(db$cluster)
+e <- seq(2, 11, by = 1)
+avg_sil_db <- sapply(e, silhouette_score_dbscan)
+plot(e, type='b', avg_sil_db, xlab='Esp', ylab='Average Silhouette Scores', frame=FALSE)
+```
+
+```{r}
+cat('Le meilleur eps pour dbscan est ', e[which.max(avg_sil_db)])
+```
+```{r}
+db <- dbscan(d.fpca, eps = e[which.max(avg_sil_db)], minPts = 2)
+table(db$cluster)
+```
+
+### Clustering sur distance DTW
+```{r}
+# Import de la matrice de distance DTW
+dtw_dist <- as.dist(readRDS("~/Stage/functionnal_data_analysis/anomaly_detection/dist_dtw_mean_2h.rds"))
+d <- readRDS("~/Stage/functionnal_data_analysis/anomaly_detection/dist_dtw_mean_2h.rds")
+```
+
+#### CAH
+```{r}
+hc <- hclust(dtw_dist, method = "ward.D2" )
+dtw.cah <- cutree(hc, k = 12)
+
+names(dtw.cah) <- rownames(df_mat)
+table(dtw.cah)
+```
+#### K-means
+```{r}
+dtw.km <- kmeans(dtw_dist, centers = 12, iter.max = 200)
+names(dtw.km$cluster) <- rownames(df_mat)
+```
+
+### Comparison des partitions obtenues
+
+```{r}
+library(NMI)
+
+NMI(cbind(names(acpf.cah), acpf.cah), cbind(names(acpf.km$cluster), acpf.km$cluster))
+```
+
+
+## Detection d'anomalie
+
+```{r}
+hc <- hclust(d.fpca, method = "ward.D2" )
+cah <- cutree(hc, k = 12)
+```
+
+```{r}
+# Nombre de courbes par cluster
+table(cah)
+```
+
+```{r}
+# Ajouter des clsters dans la base des données
+df_mean_2h$cah_cluster <- acpf.cah
+df_mean_2h <- as.data.table(df_mean_2h)
+```
+
+### Clustering sur matrice dtw
+
+```{r}
+# Import de la matrice dtw
+dtw_mat <- readRDS("~/Stage/functionnal_data_analysis/anomaly_detection/dist_dtw_mean_2h.rds")
+dtw_dist <- as.dist(dtw_mat)
+```
+
+#### CAH
+```{r}
+# CAH
+hc <- hclust(dtw_dist, method = "ward.D2" )
+plot(hc)
+```
+
+### Détection d'anomalie
+
+```{r}
+compute_depths <-function(data_with_cluster_index){
+  dt_final = NULL
+  id_cluster <- unique(data_with_cluster_index[, cah_cluster])
+  for(i in 1:length(id_cluster)){
+    # On extrait les données du cluster
+    dt <- data_with_cluster_index[cah_cluster %in% id_cluster[i], ]
+    
+    # Les fonction depth prennent des matrices ou des data.frame
+    # -- 1) Tukey depth
+    f_tukey_depth <- functional_tukey_depth(as.matrix(dt[, -c("id_prod", "cah_cluster")]))
+    
+    # -- 2) Simplicial depth
+    f_sdepth <- functional_simplicial_depth(as.matrix(dt[, -c("id_prod", "cah_cluster")]))
+
+    # semi-final data
+    dt_res <- cbind(data.table(id_prod = dt[, id_prod],
+                         cah_cluster = id_cluster[i],
+                         tdepth = f_tukey_depth,
+                         sdepth = f_sdepth),
+                    dt[, -c("id_prod", "cah_cluster")])
+    # Final data
+    if(is.null(dt_final)){
+      dt_final <- dt_res
+    }else{
+      dt_final <- rbind(dt_final, dt_res)
+    }
+  }
+  return(dt_final)
+}
+```
+
+# Etape 1 : Premier calcul de profondeur par cluster
+```{r}
+dt_cluster_depths_step1 <- compute_depths(df_mean_2h)
+```
+
+```{r}
+dt_cluster_depths_step1[cah_cluster %in% 1, .(id_prod, cah_cluster, tdepth, sdepth)]
+```
+```{r}
+df_cluster1 <- dt_cluster_depths_step1[cah_cluster %in% 1, ]
+# Tukey depth
+df_cluster1[order(tdepth), .(id_prod, cah_cluster, tdepth, sdepth)]
+
+```
+```{r}
+# Mise en évidence du cour de Cattell
+par(mfrow=c(1,2))
+plot(df_cluster1[order(tdepth, decreasing = FALSE), tdepth][1:10], type = "b", pch=10,
+     main = "Dix dernières valeurs de \n la profondeur de Tukey",
+     xlab = "Rang du parc",
+     ylab = "Profondeur de Tukey",
+     cex.main=0.7, cex.lab=0.7, cex.axis=0.75,
+     xaxt = "n")
+axis(1, at=1:10, labels=paste(100:91, "e", sep = ""))
+abline(v = 2, col = "red", type="l", lty=2)
+
+plot(df_cluster1[order(sdepth, decreasing = FALSE), sdepth][1:10], type = "b", pch=10,
+     main = "Dix dernières valeurs de \n la profondeur simpliciale",
+     xlab = "Rang du parc",
+     ylab = "Profondeur simpliciale",
+     cex.main=0.7, cex.lab=0.7, cex.axis=0.75,
+     xaxt = "n")
+axis(1, at=1:10, labels=paste(100:91, "e", sep = ""))
+abline(v = 2, col = "red", type="l", lty=2)
+```
+```{r}
+tdepth.quantile <- quantile(df_cluster1[, tdepth], seq(0,1, by = 0.01))
+sdepth.quantile <- quantile(df_cluster1[, sdepth], seq(0,1, by = 0.01))
+plot(sdepth.quantile, tdepth.quantile)
+lines(x = c(0,1), y = c(0,1))
+```
+
+```{r}
+x <- seq(0,1, , 4380)
+c_e1 <- as.matrix(df_cluster1[id_prod %in% "220953", -c("id_prod", "cah_cluster", "tdepth", "sdepth")])
+c_e2 <- as.matrix(df_cluster1[id_prod %in% "83203", -c("id_prod", "cah_cluster", "tdepth", "sdepth")])
+c_center <- as.matrix(df_cluster1[id_prod %in% "518018", -c("id_prod", "cah_cluster", "tdepth", "sdepth")])
+
+dt <- as.matrix(df_cluster1[, -c("id_prod", "cah_cluster", "tdepth", "sdepth")])
+plot(x, dt[1,], type = "l", ylab = "X(t)", xlab = "t", main = "Exemple d'une courbe de FDC")
+for(i in 2:nrow(dt)){
+  lines(x, dt[i,], type = "l")
+}
+
+plot(x, c_e2, type = "l", col = "red", ylab = "X(t)", xlab = "t", main = "Deuxième courbe la plus externe")
+lines(x, c_e1, type = "l", col = "red")
+lines(x, c_e2, type = "l", col = "red")
+```
+```{r}
+x <- seq(0,1, , 4380)
+c_e1 <- as.matrix(df_cluster1[id_prod %in% "220953", -c("id_prod", "cah_cluster", "tdepth", "sdepth")])
+c_e2 <- as.matrix(df_cluster1[id_prod %in% "83203", -c("id_prod", "cah_cluster", "tdepth", "sdepth")])
+c_center <- as.matrix(df_cluster1[id_prod %in% "518018", -c("id_prod", "cah_cluster", "tdepth", "sdepth")])
+
+dt <- as.matrix(df_cluster1[, -c("id_prod", "cah_cluster", "tdepth", "sdepth")])
+plot(x[1:336], dt[1,1:336], type = "l", ylab = "X(t)", xlab = "t", main = "")
+for(i in 2:(nrow(dt)-160)){
+  lines(x, dt[i,], type = "l")
+}
+lines(x[1:336], c_e1[1,1:336], type = "l", col = "red")
+lines(x[1:336], c_e2[1,1:336], type = "l", col = "red")
+lines(x[1:336], c_center[1,1:336], type = "l", col = "blue")
+```
+
+```{r}
+# 
+id_prod <- unique(df_cluster1[,id_prod])
+Time <- seq(0,1, , 4380)
+dt = NULL
+for (id in id_prod) {
+  r <- df_cluster1[id_prod %in% id,]
+  FDF <- as.matrix(r[, -c("id_prod", "cah_cluster", "tdepth", "sdepth")])
+  res <- data.table(id_prod = id,
+                    time = Time,
+                    FDC = FDF[1,],
+                    cah_cluster  = r[, cah_cluster],
+                    tdepth  = r[, tdepth],
+                    sdepth  = r[, sdepth])
+  if(is.null(dt)){
+    dt <- res
+  }else{
+    dt <- rbind(dt, res)
+  }
+}
+```
+
+
+
+
+
+
+
+

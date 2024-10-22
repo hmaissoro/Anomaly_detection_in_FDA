@@ -1,0 +1,102 @@
+
+R version 4.0.4 (2021-02-15) -- "Lost Library Book"
+Copyright (C) 2021 The R Foundation for Statistical Computing
+Platform: x86_64-pc-linux-gnu (64-bit)
+
+R is free software and comes with ABSOLUTELY NO WARRANTY.
+You are welcome to redistribute it under certain conditions.
+Type 'license()' or 'licence()' for distribution details.
+
+R is a collaborative project with many contributors.
+Type 'contributors()' for more information and
+'citation()' on how to cite R or R packages in publications.
+
+Type 'demo()' for some demos, 'help()' for on-line help, or
+'help.start()' for an HTML browser interface to help.
+Type 'q()' to quit R.
+
+[Previously saved workspace restored]
+
+> # -------------- Package ---------------------- #
+> library('fda.usc')
+Loading required package: fda
+Loading required package: splines
+Loading required package: Matrix
+Loading required package: fds
+Loading required package: rainbow
+Loading required package: MASS
+Loading required package: pcaPP
+Loading required package: RCurl
+
+Attaching package: ‘fda’
+
+The following object is masked from ‘package:graphics’:
+
+    matplot
+
+Loading required package: mgcv
+Loading required package: nlme
+This is mgcv 1.8-33. For overview type 'help("mgcv-package")'.
+----------------------------------------------------------------------------------
+ Functional Data Analysis and Utilities for Statistical Computing
+ fda.usc version 2.0.2 (built on 2020-02-17) is now loaded
+ fda.usc is running sequentially usign foreach package
+ Please, execute ops.fda.usc() once to run in local parallel mode
+ Deprecated functions: min.basis, min.np, anova.hetero, anova.onefactor, anova.RPm
+ New functions: optim.basis, optim.np, fanova.hetero, fanova.onefactor, fanova.RPm
+----------------------------------------------------------------------------------
+
+> library('fda')
+> 
+> # ---
+> print("#-------- Import des packages : ok --------#")
+[1] "#-------- Import des packages : ok --------#"
+> # ---
+> 
+> # -------------- Import des données ----------- #
+> # Import des données, moyenne de chaque 2h
+> # raison moyenne chaque 2h : temps de calcul long
+> 
+> df_mean_2h <- readRDS("~/Stage/functionnal_data_analysis/data_exploration/df_mean_2h.rds")
+> df_mat <- as.matrix(df_mean_2h[, -1])
+> rownames(df_mat) <- df_mean_2h[,1]
+> 
+> # ---
+> print("#-------- Import des données : ok --------#")
+[1] "#-------- Import des données : ok --------#"
+> # ---
+> 
+> # -------------- Recherche du lissage optimal -------- #
+> # On va utiliser la fonction "optim.basis"
+> # qui prend un 'fdata object' en argument
+> 
+> # 1)--- fdata object
+> df_fdata <- fdata(df_mat, argvals = 1:ncol(df_mat))
+> 
+> # 2)--- Grid for grid search 
+> nb <- floor(seq(1000, 2000, 10))
+> l <- seq(1, 10, by = 1)
+> 
+> # 3)--- Grid search 
+> 
+> df_fdata.opt_bas <- optim.basis(df_fdata,
++                               lambda = l,
++                               numbasis = readRDS("~/Stage/functionnal_data_analysis/anomaly_detection/data/df_fdata_opt_bas.rds")$numbasis.opt,
++                               type.basis = "fourier")
+> # 4)--- Saving
+> saveRDS(object = df_fdata.opt_bas, 
++         file = "~/Stage/functionnal_data_analysis/anomaly_detection/data/df_fdata_opt_bas_bis.rds")
+> 
+> 
+> # ---
+> print("#-------- Recherche terminée --------#")
+[1] "#-------- Recherche terminée --------#"
+> # ---
+> 
+> # ---------------------------------------------------------------- #
+> 
+> 
+> 
+> proc.time()
+    user   system  elapsed 
+2155.537    5.366 2162.620 

@@ -1,0 +1,1025 @@
+---
+title: "Anomaly detection based on depth functions"
+author: "Hassan Maissoro"
+date: "24/08/2021"
+output: 
+  html_document:
+    toc : true
+    toc_depth : 4
+    number_sections: false
+    theme: readable
+    highlight: tango
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    css: style.css
+    fig_width: 6.5
+    fig_height: 5
+      
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, 
+                      message = FALSE, eval = TRUE,
+                      tidy = FALSE, cache = FALSE, echo = FALSE)
+```
+
+<!-- # Packages, functions and data -->
+
+<!-- ## Import packages -->
+```{r}
+# Packages
+packages <- list('data.table', 'DT', 'crosstalk', 'grDevices',
+                 'rAmCharts', 'magrittr', 'manipulateWidget',
+                 'leaflet', 'leaflet.minicharts', 'plotly')
+
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+<!-- ## Import functions -->
+```{r, include = FALSE}
+functions_path <- '/home/hmaissoro/Stage/functionnal_data_analysis/anomaly_detection/R/'
+```
+
+```{r}
+# Functions
+lapply(list.files(functions_path,
+                  recursive = T, full.names = T, pattern = ".R$|.r$"), function(X) {
+                    source(X, encoding = 'UTF-8')
+                  }) %>% invisible
+```
+
+## Import data
+```{r, include = FALSE}
+data_path <- '/home/hmaissoro/Stage/functionnal_data_analysis/anomaly_detection/data/'
+```
+
+```{r}
+# Data
+dt_fdc_ws <- readRDS(paste0(data_path, "dt_fdc_ws.rds", sep = ""))
+
+fdc <- data.table::dcast(data = dt_fdc_ws[, .(id_prod, date, FDC)],
+                         formula = id_prod ~ date, value.var = "FDC")
+```
+
+
+```{r}
+# Plot 4 random load ratio curves
+id_parc <- unique(dt_fdc_ws[, id_prod])
+random_index <- sample(x = 1:length(id_parc), 4)
+
+# Curve 1
+curve_1 <- dyplotTimeSeries(data = dt_fdc_ws, id_parc = id_parc[random_index[1]], 
+                            col_date = "date", col_series = "FDC",
+                            group = "random-fdc")
+
+# Curve 2
+curve_2 <- dyplotTimeSeries(data = dt_fdc_ws, id_parc = id_parc[random_index[2]], 
+                            col_date = "date", col_series = "FDC", color = "#900C3F",
+                            group = "random-fdc")
+
+# Curve 3
+curve_3 <- dyplotTimeSeries(data = dt_fdc_ws, id_parc = id_parc[random_index[3]], 
+                            col_date = "date", col_series = "FDC", color = "#FFC300",
+                            group = "random-fdc")
+# Curve 4
+curve_4 <- dyplotTimeSeries(data = dt_fdc_ws, id_parc = id_parc[random_index[4]], 
+                            col_date = "date", col_series = "FDC", color = "#08B11F",
+                            group = "random-fdc")
+# Combine curves on same graph
+manipulateWidget::combineWidgets(list = list(curve_1, curve_2, curve_3, curve_4), 
+                                 ncol = 2,
+                                 height = "600px",
+                                 width = "800px")
+```
+
+
+# Anomaly detection
+
+To detect atypical curves, we are going to apply the following algorithm proposed by Horvàth and Kokoszka (2012)
+
+<ul>
+<li> <b> Step 1</b> : Compute Tukey and Simplicial depths on load ratio curves collection </li>
+<li> <b> Step 2</b> : Fix a threshold Q. All curves with depth values (Tukey and/or Simplicial) lower than Q are considered atypical. If the number of curves in collection is low stop at this step.</li>
+<li> <b> Step 3</b> : Go back to the first step without the atypical curves detected previously. </li>
+</ul>
+
+If there exists an exogenous variable
+<ul>
+<li> <b> Step 4</b> : Estimate functional linear model linking the cleaned collection of curves to the exogenous variable </li>
+<li> <b> Step 5</b> : Exact residual curves</li>
+<li> <b> Step 3</b> : Apply <b> Step 1, 2 & 3</b> on the collection of residual curves. </li>
+</ul>
+
+The aim of using Tukey and simplicial depth functions is to have an idea in the agreement of two different depth functions to detect atypical curves and the most depthest curve in a collection of curves.
+
+<hr>
+
+<div class="an-detect-1">
+
+## Step 1 : Compute depths
+
+```{r}
+#Tukey and Simplicial depths
+f_tukey_depth <- fdc[, -c("id_prod")] %>% functional_tukey_depth()
+
+f_sdepth <- fdc[, -c("id_prod")] %>% functional_simplicial_depth()
+
+fdc_depths <- data.table(id_prod = fdc[, id_prod],
+                         tdepth = f_tukey_depth,
+                         sdepth = f_sdepth)
+```
+
+```{r}
+datatable(fdc_depths,
+          options = list(pageLength = 5, autoWidth = TRUE, columnDefs = list(list(className = 'dt-center', targets = 0:2))),
+          colnames = c("Wind farm identifier", "Tukey depth", "Simplicial depth"),
+          rownames = FALSE)
+```
+
+## Step 2 : Atypical curves detection
+
+```{r chunk-depth-elbow}
+
+# Tukey depth
+tplot <- plotDepth(data = fdc_depths, col_id = "id_prod", col_depth = "tdepth",
+                   ylim = c(0, 0.35))
+
+# Simpliciale depth
+splot <- plotDepth(data = fdc_depths, col_id = "id_prod", 
+                   col_depth = "sdepth", col = "#ad1b0e",
+                   ylim = c(0, 0.45))
+
+manipulateWidget::combineWidgets(list = list(tplot, splot), 
+                                 ncol = 2,
+                                 height = "300px",
+                                 width = "800px")
+```
+
+<!-- # Commenter les courbes ci-dessus
+     # NB : add button to dynamise the threshold
+-->
+
+
+
+
+```{r chunk-depth-analysis}
+# Round to 4 digits
+fdc_depths[, c("tdepth", "sdepth") := .(round(tdepth, 4), round(sdepth, 4))]
+
+# Construct a crosslak::SharedData
+fdc_depthsSharedData <- SharedData$new(fdc_depths)
+
+bscols(widths = c(4,NA),
+       list(
+         filter_slider(id = "TukeyDepthThreshold", 
+                       label = "Tukey depth", 
+                       sharedData = fdc_depthsSharedData, 
+                       column = ~tdepth,
+                       step=0.001,
+                       width=200,
+                       round = 3),
+         filter_slider(id = "SimplicialDepthThreshold", 
+                       label = "Simplicial depth", 
+                       sharedData = fdc_depthsSharedData, 
+                       column = ~sdepth, 
+                       step=0.001,
+                       width=200,
+                       round = 3)
+       ),
+       datatable(fdc_depthsSharedData,
+                 options = list(pageLength = 10,
+                                columnDefs = list(list(className = 'dt-center', targets = 0:2)),
+                                scroller=TRUE, 
+                                deferRender=TRUE, 
+                                scrollY=300, 
+                                sDom  = '<"top">lrt<"bottom">ip'),
+                 colnames = c("Wind farm ID", "Tukey depth", "Simplicial depth"),
+                 rownames = FALSE,
+                 extensions="Scroller",  
+                 class="compact", 
+                 style="bootstrap", 
+                 width="100%")
+)
+```
+
+```{r}
+# Depthest curve
+DepthestCurve <- dyplotTimeSeries(data = dt_fdc_ws,
+                                  id_parc = "478234", 
+                                  main = "Wind farm '478234' : Most depthest curve",
+                                  col_date = "date", 
+                                  col_series = "FDC",
+                                  color = "#08B11F",
+                                  group = "random-step1")
+
+# Curve 1
+MostAtypical_1 <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                   id_parc = "551629", 
+                                   main = "Wind farm '551629' : Most externe curve",
+                                   col_date = "date", 
+                                   col_series = "FDC",
+                                   group = "random-step1")
+
+# Curve 2
+MostAtypical_2  <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                    id_parc = "137668", 
+                                    main = "Wind farm '137668' : Second most externe curve",
+                                    col_date = "date", 
+                                    col_series = "FDC", 
+                                    color = "#900C3F",
+                                    group = "random-step1")
+
+# Curve 3
+MostAtypical_3 <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                   id_parc = "534693",
+                                   main = "Wind farm '534693' : Third most externe curve",
+                                   col_date = "date", 
+                                   col_series = "FDC", 
+                                   color = "#FFC300",
+                                   group = "random-step1")
+
+# Combine curves on same graph
+manipulateWidget::combineWidgets(list = list(DepthestCurve, 
+                                             MostAtypical_1, 
+                                             MostAtypical_2, 
+                                             MostAtypical_3), 
+                                 ncol = 2,
+                                 height = "600px",
+                                 width = "800px")
+
+```
+
+
+
+
+
+
+<!--Toutes les courbes atypiques on un problème lié à la Puissance Installée (PI) -->
+
+Three wind farms are considered atypical at this stage. Their identifiers are "551629", "137668" and "534693".
+<hr>
+</div>
+<div class="an-detect-2">
+## Step 3 : back to step 1
+
+<!-- {.tabset .tabset-fade .tabset-pills} -->
+
+```{r}
+# Remove the atypical curves detected previously
+fdc_FirstCleaning <- fdc[! id_prod %in% c("551629", "137668", "534693"), ]
+```
+
+### Step 1 bis : Compute depths again
+
+```{r}
+#Tukey and Simplicial depths
+f_tukey_depth <- fdc_FirstCleaning[, -c("id_prod")] %>% functional_tukey_depth()
+
+f_sdepth <- fdc_FirstCleaning[, -c("id_prod")] %>% functional_simplicial_depth()
+
+# Combine depths in data.table
+fdc_depths <- data.table(id_prod = fdc_FirstCleaning[, id_prod],
+                         tdepth = f_tukey_depth,
+                         sdepth = f_sdepth)
+```
+
+### Step 2 bis : detect anomaly
+
+<!-- Voir s'il y a pas une meilleure option -->
+```{r ref.label=c('chunk-depth-elbow'), echo = FALSE}
+
+```
+
+```{r ref.label=c('chunk-depth-analysis'), echo = FALSE}
+
+```
+
+<!-- According to Tukey depth... visible problem for simplicial depth -->
+
+```{r, echo = FALSE, eval=FALSE}
+
+# Curve 1
+MostAtypical_1 <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                   id_parc = "16465", 
+                                   main = "Wind farm '16465' : Most externe curve",
+                                   col_date = "date", 
+                                   col_series = "FDC",
+                                   group = "random-step1-bis")
+
+# Curve 2
+MostAtypical_2  <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                    id_parc = "51867", 
+                                    main = "Wind farm '51867' : Second most externe curve",
+                                    col_date = "date", 
+                                    col_series = "FDC", 
+                                    color = "#900C3F",
+                                    group = "random-step1-bis")
+
+# Curve 3
+MostAtypical_3 <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                   id_parc = "144482",
+                                   main = "Wind farm '144482' : Third most externe curve",
+                                   col_date = "date", 
+                                   col_series = "FDC", 
+                                   color = "#FFC300",
+                                   group = "random-step1-bis")
+
+# Curve
+MostAtypical_4 <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                   id_parc = "436002", 
+                                   main = "Wind farm '436002' : fourth most externe curve",
+                                   col_date = "date", 
+                                   col_series = "FDC", 
+                                   color = "#08B11F",
+                                   group = "random-step1-bis")
+
+# Combine curves on same graph
+manipulateWidget::combineWidgets(list = list(MostAtypical_1, 
+                                             MostAtypical_2, 
+                                             MostAtypical_3, 
+                                             MostAtypical_4), 
+                                 ncol = 2,
+                                 height = "600px",
+                                 width = "800px")
+
+```
+
+
+
+```{r, eval=FALSE}
+ax <- list(
+  title = "",
+  zeroline = FALSE,
+  showline = FALSE,
+  showticklabels = TRUE,
+  showgrid = FALSE
+)
+# Plot depth contour
+
+df <- dt_fdc_ws[id_prod %in% "51867", .(id_prod, date, FDC)]
+
+df <- df[, c("time", 
+             "tdepth", 
+             "sdepth") := .(difftime(date, as.POSIXct("2017-01-01 00:00:00 GMT"), units = "hours"),
+                            tukey_depth(FDC),
+                            simplicial_depth(FDC))
+]
+
+convex.hull0.25 <- df[
+  rank(FDC, ties.method = "min") < ifelse(floor(length(FDC)*0.25), 
+                                          floor(length(FDC)*0.25),
+                                          floor(length(FDC)*0.25) +1 )][chull(FDC)]
+
+convex.hull0.5 <- df[
+  rank(FDC, ties.method = "min") < ifelse(floor(length(FDC)*0.5), 
+                                          floor(length(FDC)*0.5), 
+                                          floor(length(FDC)*0.5) +1 )][chull(FDC)]
+convex.hull0.75 <- df[
+  rank(FDC, ties.method = "min") < ifelse(floor(length(FDC)*0.75), 
+                                          floor(length(FDC)*0.75), 
+                                          floor(length(FDC)*0.75) +1 )][chull(FDC)]
+convex.hull0.975 <- df[
+  rank(FDC, ties.method = "min") < ifelse(floor(length(FDC)*0.975), 
+                                          floor(length(FDC)*0.975), 
+                                          floor(length(FDC)*0.975) +1 )][chull(FDC)]
+
+p <- plot_ly(data = df, x= ~time, y = ~FDC, type = "scatter",
+        marker = list(size = 4, color = ~tdepth),
+        name = "Observed FDC"
+) %>%
+  layout(
+    xaxis = ax,
+    yaxis = ax,
+    margin = list(pad = 20),
+    legend = list(orientation = 'h')
+  )
+
+
+dc1 <- p %>% 
+  add_polygons(x = convex.hull0.25[, time], 
+               y = convex.hull0.25[, FDC], 
+               fillcolor='rgba(255, 0, 0, 0.0)',
+               marker = list(size = 1, color = "#111613 ",
+                             line = list(color = "black", width = 2)),
+               line = list(color = "#111613"),
+               name = '0.25 th Q. surface') %>% 
+  add_markers(x = df[which.max(tdepth), time], y = df[which.max(tdepth), FDC],
+              marker = list(size = 10, color = "blue"),
+              name = "Most depthest point")
+
+dc2 <- p %>% 
+  add_polygons(x = convex.hull0.5[, time], 
+               y = convex.hull0.5[, FDC], 
+               fillcolor='rgba(255, 0, 0, 0.0)',
+               marker = list(size = 1, color = "#FFC300",
+                             line = list(color = "black", width = 2)),
+               line = list(color = "#FFC300"),
+               name = '0.5 th Q. surface') %>% 
+  add_markers(x = df[which.max(tdepth), time], y = df[which.max(tdepth), FDC],
+              marker = list(size = 10, color = "blue"),
+              name = "Most depthest point")
+
+
+dc3 <- p %>% 
+  add_polygons(x = convex.hull0.75[, time], 
+               y = convex.hull0.75[, FDC], 
+               fillcolor='rgba(255, 0, 0, 0.0)',
+               marker = list(size = 1, color = "#7D3C98",
+                             line = list(color = "black", width = 2)),
+               line = list(color = "#7D3C98"),
+               name = '0.75 th Q. surface') %>% 
+  add_markers(x = df[which.max(tdepth), time], y = df[which.max(tdepth), FDC],
+              marker = list(size = 10, color = "blue"),
+              name = "Most depthest point")
+
+dc4 <- p %>% 
+  add_polygons(x = convex.hull0.975[, time], 
+               y = convex.hull0.975[, FDC],
+               fillcolor='rgba(255, 0, 0, 0.0)',
+               marker = list(size = 1, color = "#15EE6E",
+                             line = list(color = "black", width = 2)),
+               line = list(color = "#15EE6E"),
+               name = '0.975 th Q. surface') %>% 
+  add_markers(x = df[which.max(tdepth), time], y = df[which.max(tdepth), FDC],
+              marker = list(size = 10, color = "blue"),
+              name = "Most depthest point")
+
+# Combine curves on same graph
+manipulateWidget::combineWidgets(list = list(dc1, dc2, dc3, dc4), 
+                                 ncol = 2,
+                                 height = "600px",
+                                 width = "800px")
+
+```
+<hr>
+</div>
+<div class="an-detect-3">
+### Step 3 bis : back to step 1
+
+<!-- {.tabset} -->
+
+```{r}
+# Remove the atypical curves detected previously
+fdc_SecondCleaning <- fdc_FirstCleaning[! id_prod %in% c("16465", "51867", "144482", "436002"), ]
+```
+
+#### Step 1 ter : compute depths
+
+```{r}
+#Tukey and Simplicial depths
+f_tukey_depth <- fdc_SecondCleaning[, -c("id_prod")] %>% functional_tukey_depth()
+
+f_sdepth <- fdc_SecondCleaning[, -c("id_prod")] %>% functional_simplicial_depth()
+
+# Combine depths in data.table
+fdc_depths <- data.table(id_prod = fdc_SecondCleaning[, id_prod],
+                         tdepth = f_tukey_depth,
+                         sdepth = f_sdepth)
+```
+
+#### Step 2 ter : detect anomaly
+
+<!-- Voir s'il y a pas une meilleure option -->
+
+```{r ref.label=c('chunk-depth-elbow'), echo = FALSE}
+
+```
+
+```{r ref.label=c('chunk-depth-analysis'), echo = FALSE}
+
+```
+
+<!-- According to Tukey depth... visible problem for simplicial depth -->
+
+```{r, echo = FALSE, eval=FALSE}
+
+# Curve 1
+MostAtypical_1 <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                   id_parc = "404797", 
+                                   main = "Wind farm '404797' : Most externe curve",
+                                   col_date = "date", 
+                                   col_series = "FDC",
+                                   group = "random-step1-ter")
+
+# Curve 2
+MostAtypical_2  <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                    id_parc = "42930", 
+                                    main = "Wind farm '42930' : Second most externe curve",
+                                    col_date = "date", 
+                                    col_series = "FDC", 
+                                    color = "#900C3F",
+                                    group = "random-step1-ter")
+
+# Curve 3
+MostAtypical_3 <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                   id_parc = "46895",
+                                   main = "Wind farm '46895' : Third most externe curve",
+                                   col_date = "date", 
+                                   col_series = "FDC", 
+                                   color = "#FFC300",
+                                   group = "random-step1-ter")
+
+# Curve
+MostAtypical_4 <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                   id_parc = "139348", 
+                                   main = "Wind farm '139348' : fourth most externe curve",
+                                   col_date = "date", 
+                                   col_series = "FDC", 
+                                   color = "#08B11F",
+                                   group = "random-step1-ter")
+
+# Combine curves on same graph
+manipulateWidget::combineWidgets(list = list(MostAtypical_1, 
+                                             MostAtypical_2, 
+                                             MostAtypical_3, 
+                                             MostAtypical_4), 
+                                 ncol = 2,
+                                 height = "600px",
+                                 width = "800px")
+
+```
+
+
+
+```{r, eval=FALSE}
+# Plot depth contour
+
+df <- dt_fdc_ws[id_prod %in% "42930", .(id_prod, date, FDC)]
+
+df <- df[, c("time", 
+             "tdepth", 
+             "sdepth") := .(difftime(date, as.POSIXct("2017-01-01 00:00:00 GMT"), units = "hours"),
+                            tukey_depth(FDC),
+                            simplicial_depth(FDC))
+]
+
+convex.hull0.25 <- df[
+  rank(FDC, ties.method = "min") < ifelse(floor(length(FDC)*0.25), 
+                                          floor(length(FDC)*0.25),
+                                          floor(length(FDC)*0.25) +1 )][chull(FDC)]
+
+convex.hull0.5 <- df[
+  rank(FDC, ties.method = "min") < ifelse(floor(length(FDC)*0.5), 
+                                          floor(length(FDC)*0.5), 
+                                          floor(length(FDC)*0.5) +1 )][chull(FDC)]
+convex.hull0.75 <- df[
+  rank(FDC, ties.method = "min") < ifelse(floor(length(FDC)*0.75), 
+                                          floor(length(FDC)*0.75), 
+                                          floor(length(FDC)*0.75) +1 )][chull(FDC)]
+convex.hull0.975 <- df[
+  rank(FDC, ties.method = "min") < ifelse(floor(length(FDC)*0.975), 
+                                          floor(length(FDC)*0.975), 
+                                          floor(length(FDC)*0.975) +1 )][chull(FDC)]
+
+p <- plot_ly(data = df, x= ~time, y = ~FDC, type = "scatter",
+        marker = list(size = 4, color = ~tdepth),
+        name = "Observed FDC"
+) %>%
+  layout(
+    xaxis = ax,
+    yaxis = ax,
+    margin = list(pad = 20),
+    legend = list(orientation = 'h')
+  )
+
+
+dc1 <- p %>% 
+  add_polygons(x = convex.hull0.25[, time], 
+               y = convex.hull0.25[, FDC], 
+               fillcolor='rgba(255, 0, 0, 0.0)',
+               marker = list(size = 1, color = "#111613 ",
+                             line = list(color = "black", width = 2)),
+               line = list(color = "#111613"),
+               name = '0.25 th Q. surface') %>% 
+  add_markers(x = df[which.max(tdepth), time], y = df[which.max(tdepth), FDC],
+              marker = list(size = 10, color = "blue"),
+              name = "Most depthest point")
+
+dc2 <- p %>% 
+  add_polygons(x = convex.hull0.5[, time], 
+               y = convex.hull0.5[, FDC], 
+               fillcolor='rgba(255, 0, 0, 0.0)',
+               marker = list(size = 1, color = "#FFC300",
+                             line = list(color = "black", width = 2)),
+               line = list(color = "#FFC300"),
+               name = '0.5 th Q. surface') %>% 
+  add_markers(x = df[which.max(tdepth), time], y = df[which.max(tdepth), FDC],
+              marker = list(size = 10, color = "blue"),
+              name = "Most depthest point")
+
+
+dc3 <- p %>% 
+  add_polygons(x = convex.hull0.75[, time], 
+               y = convex.hull0.75[, FDC], 
+               fillcolor='rgba(255, 0, 0, 0.0)',
+               marker = list(size = 1, color = "#7D3C98",
+                             line = list(color = "black", width = 2)),
+               line = list(color = "#7D3C98"),
+               name = '0.75 th Q. surface') %>% 
+  add_markers(x = df[which.max(tdepth), time], y = df[which.max(tdepth), FDC],
+              marker = list(size = 10, color = "blue"),
+              name = "Most depthest point")
+
+dc4 <- p %>% 
+  add_polygons(x = convex.hull0.975[, time], 
+               y = convex.hull0.975[, FDC],
+               fillcolor='rgba(255, 0, 0, 0.0)',
+               marker = list(size = 1, color = "#15EE6E",
+                             line = list(color = "black", width = 2)),
+               line = list(color = "#15EE6E"),
+               name = '0.975 th Q. surface') %>% 
+  add_markers(x = df[which.max(tdepth), time], y = df[which.max(tdepth), FDC],
+              marker = list(size = 10, color = "blue"),
+              name = "Most depthest point")
+
+# Combine curves on same graph
+manipulateWidget::combineWidgets(list = list(dc1, dc2, dc3, dc4), 
+                                 ncol = 2,
+                                 height = "600px",
+                                 width = "800px")
+
+```
+
+
+#### Step 3 ter : Stop here
+<hr>
+</div>
+<div class="an-detect-res">
+
+## Step 4 : Estimate de linear model
+
+<ul>
+<li> <b> Dpendent Variable </b> : Load profile curves ;</li>
+<li> <b> Independent Variable</b> : Wind speed at 100m ;</li> <br>
+
+<li> <b>Purpose </b> : Detect anomaly on the collection of residual curves. </li>
+</ul>
+
+```{r}
+# Get the collection of cleaned curves
+dt_fdc_ws <- dt_fdc_ws[! id_prod %in% c("551629", "137668", "534693", "16465", "51867", "144482", "436002"), ]
+```
+
+```{r}
+setnames(dt_fdc_ws, c("LON", "LAT", "lon", "lat"), c("lon_parc", "lat_parc", "lon_ws", "lat_ws"))
+
+```
+
+
+### Matching Parc - Station méto
+```{r}
+
+dt_loc_parc <- unique(dt_fdc_ws[, .(lon_parc, lat_parc, lon_ws, lat_ws), by = id_prod])
+dt_loc_ws <- unique(dt_fdc_ws[, .(lon_ws, lat_ws), by = id_ws.x])
+
+## Faire une carte leaflet
+leaflet() %>% 
+  addTiles() %>% 
+  setView(lng = 2.80, lat = 46.80, zoom = 5) %>% 
+  addCircleMarkers(lng = dt_loc_parc[, lon_parc],
+                   lat = dt_loc_parc[, lat_parc],
+                   radius = 3,
+                   weight = 2,
+                   opacity = 0.8) %>% 
+  addCircleMarkers(lng = dt_loc_ws[, lon_ws],
+                   lat = dt_loc_ws[, lat_ws],
+                   color = "red",
+                   radius = 3,
+                   weight = 2,
+                   opacity = 0.8) %>% 
+  addLegend(position = c("topright"), 
+            colors = c("blue", "red"),
+            labels = c("Parc éolien", "Station météo"),
+            title = "Légende") %>% 
+  addFlows(dt_loc_parc[, lon_parc],
+           dt_loc_parc[, lat_parc],
+           dt_loc_parc[, lon_ws],
+           dt_loc_parc[, lat_ws], dir = 0, maxThickness = 2
+  )
+```
+
+<!-- Quelques scatter plots -->
+
+```{r}
+# Plot 4 random load ratio curves
+id_parc <- unique(dt_fdc_ws[, id_prod])
+random_index <- sample(x = 1:length(id_parc), 4)
+
+ 
+sp1 <- plot_ly(data = dt_fdc_ws[id_prod %in% id_parc[random_index[1]], .(id_prod, FDC, wind_sp_100)], 
+               x= ~wind_sp_100, 
+               y = ~FDC, 
+               type = "scatter",
+               marker = list(size = 5)
+)%>%
+  layout(
+    title = paste("Wind farm", id_parc[random_index[1]]),
+    xaxis = list(title = "Wind speed at 100m", 
+                 zeroline = FALSE, 
+                 showline = FALSE, 
+                 showticklabels = TRUE, 
+                 showgrid = FALSE),
+    yaxis = list(title = "Load profile", 
+                 zeroline = FALSE, 
+                 showline = FALSE, 
+                 showticklabels = TRUE, 
+                 showgrid = FALSE),
+    margin = list(pad = 20)
+  )
+
+sp2 <- plot_ly(data = dt_fdc_ws[id_prod %in% id_parc[random_index[2]], .(id_prod, FDC, wind_sp_100)], 
+               x= ~wind_sp_100, 
+               y = ~FDC, 
+               type = "scatter",
+               marker = list(size = 5, color = "#900C3F")
+)%>%
+  layout(
+    title = paste("Wind farm", id_parc[random_index[2]]),
+    xaxis = list(title = "Wind speed at 100m", 
+                 zeroline = FALSE, 
+                 showline = FALSE, 
+                 showticklabels = TRUE, 
+                 showgrid = FALSE),
+    yaxis = list(title = "Load profile", 
+                 zeroline = FALSE, 
+                 showline = FALSE, 
+                 showticklabels = TRUE, 
+                 showgrid = FALSE),
+    margin = list(pad = 20)
+  )
+
+sp3 <- plot_ly(data = dt_fdc_ws[id_prod %in% id_parc[random_index[3]], .(id_prod, FDC, wind_sp_100)], 
+               x= ~wind_sp_100, 
+               y = ~FDC, 
+               type = "scatter",
+               marker = list(size = 5, color = "#FFC300")
+)%>%
+  layout(
+    title = paste("Wind farm", id_parc[random_index[3]]),
+    xaxis = list(title = "Wind speed at 100m", 
+                 zeroline = FALSE, 
+                 showline = FALSE, 
+                 showticklabels = TRUE, 
+                 showgrid = FALSE),
+    yaxis = list(title = "Load profile", 
+                 zeroline = FALSE, 
+                 showline = FALSE, 
+                 showticklabels = TRUE, 
+                 showgrid = FALSE),
+    margin = list(pad = 20)
+  )
+
+sp4 <- plot_ly(data = dt_fdc_ws[id_prod %in% id_parc[random_index[4]], .(id_prod, FDC, wind_sp_100)], 
+               x= ~wind_sp_100, 
+               y = ~FDC, 
+               type = "scatter",
+               marker = list(size = 5, color = "#08B11F")
+)%>%
+  layout(
+    title = paste("Wind farm", id_parc[random_index[4]]),
+    xaxis = list(title = "Wind speed at 100m", 
+                 zeroline = FALSE, 
+                 showline = FALSE, 
+                 showticklabels = TRUE, 
+                 showgrid = FALSE),
+    yaxis = list(title = "Load profile", 
+                 zeroline = FALSE, 
+                 showline = FALSE, 
+                 showticklabels = TRUE, 
+                 showgrid = FALSE),
+    margin = list(pad = 20)
+  )
+
+# Combine curves on same graph
+manipulateWidget::combineWidgets(list = list(sp1, sp2, sp3, sp4), 
+                                 ncol = 2,
+                                 height = "600px",
+                                 width = "800px")
+
+
+
+
+```
+
+
+
+### Estimate linear model
+
+```{r, echo = FALSE}
+# --- Modèle linéaire --- #
+
+# variable dépendante : FDC
+# variable indépendante : vind_sp_100
+
+fdc <- data.table::dcast(data = dt_fdc_ws[, .(id_prod, date, FDC)],
+                         formula = id_prod ~ date, value.var = "FDC")
+
+wind_sp <- data.table::dcast(data = dt_fdc_ws[, .(id_prod, date, wind_sp_100)],
+                             formula = id_prod ~ date, value.var = "wind_sp_100")
+
+
+# --- Lissage des courbes avec des paramètres par defaut --- #
+
+## Base de fourier
+fb <- create.fourier.basis(rangeval = c(1, 365*24), nbasis =  1780)
+
+## 1) Lissage
+fdc.fd <- Data2fd(argvals = 1:(365*24), y = t(fdc[, -1]),
+                  lambda = 10,
+                  basisobj = fb, method="chol", dfscale=1)
+
+wind_sp.fd <- Data2fd(argvals = 1:(365*24), y = t(wind_sp[, -1]),
+                      lambda = 10,
+                      basisobj = fb, method="chol", dfscale=1)
+
+## Mettre l'id_parc des courbes nom des courbes
+fdc.fd$fdnames$reps <- fdc[, id_prod]
+wind_sp.fd$fdnames$reps <- wind_sp[, id_prod]
+
+residus <- get_linear_model_resuals(y_curves = fdc.fd, x_curves = wind_sp.fd, y.ncp = 5, x.ncp = 5)
+```
+
+## Step 6 : Detection on residual curves
+
+### Step 1 : Compute depths
+
+```{r}
+#Tukey and Simplicial depths
+f_tukey_depth <- residus[, -c("id_prod")] %>% functional_tukey_depth()
+
+f_sdepth <- residus[, -c("id_prod")] %>% functional_simplicial_depth()
+
+# Combine depths in data.table
+fdc_depths <- data.table(id_prod = residus[, id_prod],
+                         tdepth = f_tukey_depth,
+                         sdepth = f_sdepth)
+```
+
+### Step 2 : detect anomaly
+
+<!-- Voir s'il y a pas une meilleure option -->
+
+```{r ref.label=c('chunk-depth-elbow'), echo = FALSE}
+
+```
+
+```{r ref.label=c('chunk-depth-analysis'), echo = FALSE}
+
+```
+
+<!-- According to Tukey depth... visible problem for simplicial depth -->
+
+```{r, echo = FALSE}
+
+# Curve 1
+MostAtypical_1 <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                   id_parc = "63798", 
+                                   main = "Wind farm '63798' : Most externe curve",
+                                   col_date = "date", 
+                                   col_series = "FDC",
+                                   group = "random-step1-res")
+
+# Curve 2
+MostAtypical_2  <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                    id_parc = "62363", 
+                                    main = "Wind farm '62363' : Second most externe curve",
+                                    col_date = "date", 
+                                    col_series = "FDC", 
+                                    color = "#900C3F",
+                                    group = "random-step1-res")
+
+# Curve 3
+MostAtypical_3 <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                   id_parc = "62362",
+                                   main = "Wind farm '62362' : Third most externe curve",
+                                   col_date = "date", 
+                                   col_series = "FDC", 
+                                   color = "#FFC300",
+                                   group = "random-step1-res")
+
+# Curve
+Central_curves <- dyplotTimeSeries(data = dt_fdc_ws, 
+                                   id_parc = "33238", 
+                                   main = "Wind farm '33238' : Central curve",
+                                   col_date = "date", 
+                                   col_series = "FDC", 
+                                   color = "#08B11F",
+                                   group = "random-step1-res")
+
+# Combine curves on same graph
+manipulateWidget::combineWidgets(list = list(Central_curves,
+                                             MostAtypical_1, 
+                                             MostAtypical_2, 
+                                             MostAtypical_3), 
+                                 ncol = 2,
+                                 height = "600px",
+                                 width = "800px")
+
+```
+
+
+<b>Depth contour</b>
+
+```{r}
+# Plot depth contour
+
+df <- dt_fdc_ws[id_prod %in% "62362", .(id_prod, date, FDC)]
+
+df <- df[, c("time", 
+             "tdepth", 
+             "sdepth") := .(difftime(date, as.POSIXct("2017-01-01 00:00:00 GMT"), units = "hours"),
+                            tukey_depth(FDC),
+                            simplicial_depth(FDC))
+]
+
+convex.hull0.25 <- df[
+  rank(FDC, ties.method = "min") < ifelse(floor(length(FDC)*0.25), 
+                                          floor(length(FDC)*0.25),
+                                          floor(length(FDC)*0.25) +1 )][chull(FDC)]
+
+convex.hull0.5 <- df[
+  rank(FDC, ties.method = "min") < ifelse(floor(length(FDC)*0.5), 
+                                          floor(length(FDC)*0.5), 
+                                          floor(length(FDC)*0.5) +1 )][chull(FDC)]
+convex.hull0.75 <- df[
+  rank(FDC, ties.method = "min") < ifelse(floor(length(FDC)*0.75), 
+                                          floor(length(FDC)*0.75), 
+                                          floor(length(FDC)*0.75) +1 )][chull(FDC)]
+convex.hull0.975 <- df[
+  rank(FDC, ties.method = "min") < ifelse(floor(length(FDC)*0.975), 
+                                          floor(length(FDC)*0.975), 
+                                          floor(length(FDC)*0.975) +1 )][chull(FDC)]
+
+p <- plot_ly(data = df, x= ~time, y = ~FDC, type = "scatter",
+        marker = list(size = 4, color = ~tdepth),
+        name = "Observed FDC"
+) %>%
+  layout(
+    xaxis = ax,
+    yaxis = ax,
+    margin = list(pad = 20),
+    legend = list(orientation = 'h')
+  )
+
+
+dc1 <- p %>% 
+  add_polygons(x = convex.hull0.25[, time], 
+               y = convex.hull0.25[, FDC], 
+               fillcolor='rgba(255, 0, 0, 0.0)',
+               marker = list(size = 1, color = "#111613 ",
+                             line = list(color = "black", width = 2)),
+               line = list(color = "#111613"),
+               name = '0.25 th Q. surface') %>% 
+  add_markers(x = df[which.max(tdepth), time], y = df[which.max(tdepth), FDC],
+              marker = list(size = 10, color = "blue"),
+              name = "Most depthest point")
+
+dc2 <- p %>% 
+  add_polygons(x = convex.hull0.5[, time], 
+               y = convex.hull0.5[, FDC], 
+               fillcolor='rgba(255, 0, 0, 0.0)',
+               marker = list(size = 1, color = "#FFC300",
+                             line = list(color = "black", width = 2)),
+               line = list(color = "#FFC300"),
+               name = '0.5 th Q. surface') %>% 
+  add_markers(x = df[which.max(tdepth), time], y = df[which.max(tdepth), FDC],
+              marker = list(size = 10, color = "blue"),
+              name = "Most depthest point")
+
+
+dc3 <- p %>% 
+  add_polygons(x = convex.hull0.75[, time], 
+               y = convex.hull0.75[, FDC], 
+               fillcolor='rgba(255, 0, 0, 0.0)',
+               marker = list(size = 1, color = "#7D3C98",
+                             line = list(color = "black", width = 2)),
+               line = list(color = "#7D3C98"),
+               name = '0.75 th Q. surface') %>% 
+  add_markers(x = df[which.max(tdepth), time], y = df[which.max(tdepth), FDC],
+              marker = list(size = 10, color = "blue"),
+              name = "Most depthest point")
+
+dc4 <- p %>% 
+  add_polygons(x = convex.hull0.975[, time], 
+               y = convex.hull0.975[, FDC],
+               fillcolor='rgba(255, 0, 0, 0.0)',
+               marker = list(size = 1, color = "#15EE6E",
+                             line = list(color = "black", width = 2)),
+               line = list(color = "#15EE6E"),
+               name = '0.975 th Q. surface') %>% 
+  add_markers(x = df[which.max(tdepth), time], y = df[which.max(tdepth), FDC],
+              marker = list(size = 10, color = "blue"),
+              name = "Most depthest point")
+
+# Combine curves on same graph
+manipulateWidget::combineWidgets(list = list(dc1, dc2, dc3, dc4), 
+                                 ncol = 2,
+                                 height = "600px",
+                                 width = "800px")
+
+```
+
+
+### Step 3 : Stop here
+</div>

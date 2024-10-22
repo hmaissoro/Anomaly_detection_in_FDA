@@ -1,0 +1,127 @@
+
+R version 4.0.4 (2021-02-15) -- "Lost Library Book"
+Copyright (C) 2021 The R Foundation for Statistical Computing
+Platform: x86_64-pc-linux-gnu (64-bit)
+
+R is free software and comes with ABSOLUTELY NO WARRANTY.
+You are welcome to redistribute it under certain conditions.
+Type 'license()' or 'licence()' for distribution details.
+
+R is a collaborative project with many contributors.
+Type 'contributors()' for more information and
+'citation()' on how to cite R or R packages in publications.
+
+Type 'demo()' for some demos, 'help()' for on-line help, or
+'help.start()' for an HTML browser interface to help.
+Type 'q()' to quit R.
+
+[Previously saved workspace restored]
+
+> # -------------- Package ---------------------- #
+> library('dtw', quietly = TRUE)
+
+Attaching package: ‘proxy’
+
+The following objects are masked from ‘package:stats’:
+
+    as.dist, dist
+
+The following object is masked from ‘package:base’:
+
+    as.matrix
+
+Loaded dtw v1.22-3. See ?dtw for help, citation("dtw") for use in publication.
+
+> library('doParallel', quietly = TRUE)
+> # ---
+> print("#-------- Import des packages : ok --------#")
+[1] "#-------- Import des packages : ok --------#"
+> # ---
+> 
+> # -------------- Import des données ----------- #
+> # Import des données, moyenne de chaque 2h
+> # raison moyenne chaque 2h : temps de calcul long
+> 
+> df_mean_2h <- readRDS("~/Stage/functionnal_data_analysis/data_exploration/df_mean_2h.rds")
+> df_mat <- as.matrix(df_mean_2h[, -1])
+> rownames(df_mat) <- df_mean_2h[,1]
+> # ---
+> print("#-------- Import des données : ok --------#")
+[1] "#-------- Import des données : ok --------#"
+> # ---
+> 
+> # -------------- Calcul de la matrice dtw -------- #
+> 
+> # Calcul de la distance DTW
+> dist_dtw <- matrix(data = 0, nrow = nrow(df_mat), ncol = nrow(df_mat))
+> 
+> # 1) - la matrice de distance est symétrique
+> # 2) - il suffit de calculer la partie triangulaire inférieure
+> # 3) - la diagonale est nulle
+> 
+> # 4) - On va utiliser la parrelisation
+> 
+> # ----------- Parallélisation 
+> # 1) Récupère le nombre de coeurs composant la machine
+> cl <- detectCores()
+> 
+> # 2) Crée les ensembles de copies de R
+> makeCluster(cl - 6)
+socket cluster with 10 nodes on host ‘localhost’
+> 
+> # 3) Enregistre le backend parallèle pour la parallélisation du processus
+> registerDoParallel(cl - 6)
+> 
+> 
+> # ----------- Calcul de la distance DTW
+> # 1)--- Calcul de la matrice de distance
+> 
+> Sys.time()
+[1] "2021-06-23 11:16:13 UTC"
+> for(i in 2:nrow(df_mat)){
++   for(j in 1:(i-1)){
++     
++     # On calcul la distance DTW
++     dist_dtw[i, j] <- dtw(na.omit(df_mat[i,]), na.omit(df_mat[j,]), distance.only=TRUE)$normalizedDistance
++     
++     # On affecte la valeur transposée
++     dist_dtw[j, i] <- dist_dtw[i, j]
++   }
++ }
+Warning messages:
+1: In for (j in 1:(i - 1)) { :
+  closing unused connection 13 (<-localhost:11608)
+2: In for (j in 1:(i - 1)) { :
+  closing unused connection 12 (<-localhost:11608)
+3: In for (j in 1:(i - 1)) { :
+  closing unused connection 11 (<-localhost:11608)
+4: In for (j in 1:(i - 1)) { :
+  closing unused connection 10 (<-localhost:11608)
+5: In for (j in 1:(i - 1)) { :
+  closing unused connection 9 (<-localhost:11608)
+6: In for (j in 1:(i - 1)) { :
+  closing unused connection 8 (<-localhost:11608)
+7: In for (j in 1:(i - 1)) { :
+  closing unused connection 7 (<-localhost:11608)
+8: In for (j in 1:(i - 1)) { :
+  closing unused connection 6 (<-localhost:11608)
+9: In for (j in 1:(i - 1)) { :
+  closing unused connection 5 (<-localhost:11608)
+10: In for (j in 1:(i - 1)) { :
+  closing unused connection 4 (<-localhost:11608)
+> Sys.time()
+[1] "2021-07-01 06:15:09 UTC"
+> 
+> # 4)--- Saving
+> saveRDS(object = dist_dtw, 
++         file = "~/Stage/functionnal_data_analysis/anomaly_detection/dist_dtw_mean_2h.rds")
+> 
+> # ---
+> print("# -------------- Calcul de la matrice dtw : fin -------- #")
+[1] "# -------------- Calcul de la matrice dtw : fin -------- #"
+> # ---
+> # --------------------------------------------------- #
+> 
+> proc.time()
+    user   system  elapsed 
+472511.5 200456.4 673142.8 
