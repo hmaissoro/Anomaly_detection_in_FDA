@@ -6,13 +6,13 @@ A typical example of functional data is the collection of load curves from wind 
 This repository contains code for detecting "anomalous" curves in a collection using the concept of "depth," which ranks curves from the center outward.
 
 ### Study and implementation of depth functions for functional data
-    - Tukey depth and simplicial depth functions
-    - Application to wind farm load curves
-    - Cluster-based anomaly detection to reduce the influence of exogenous factors like wind speed.
+- Tukey depth and simplicial depth functions
+- Application to wind farm load curves
+- Cluster-based anomaly detection to reduce the influence of exogenous factors like wind speed.
 
 ### Study and implementation of anomaly detection on the residuals of a functional linear model:
-    - The aim is to isolate the influence of wind on wind power generation for better anomaly detection.
-    - Functional linear model:
-        - **Dependent variable:** Load curves
-        - **Independent variable:** Wind speed curves at 100 meters.
-    - Residual extraction and anomaly detection applied to the entire curve collection and homogeneous clusters.
+- The aim is to isolate the influence of wind on wind power generation for better anomaly detection.
+- Functional linear model:
+    - **Dependent variable:** Load curves
+    - **Independent variable:** Wind speed curves at 100 meters.
+- Residual extraction and anomaly detection applied to the entire curve collection and homogeneous clusters.
